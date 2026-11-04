@@ -812,6 +812,7 @@ const keys = {};
 let charging = false, charge = 0, stickX = 0, stickY = 0, stickMag = 0;
 const TRAILER = /[?&]trailer\b/.test(location.search);
 const trailerEase = TRAILER ? 0.82 : 1;
+let autopilot = false, apCharge = 0.5, apSprint = false, trailerFixed = false, rec = null, recStart = 0, recMime = '', recChunks = [];
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
@@ -1163,7 +1164,6 @@ function draw(dt, t) {
 }
 
 // ---------- Trailer mode (?trailer): the hero plays itself and a 1080p clip is recorded with title and end cards ----------
-let autopilot = false, apCharge = 0.5, apSprint = false, trailerFixed = false, rec = null, recStart = 0, recMime = '', recChunks = [];
 const T_INTRO = 2.8, T_GAME = 30, T_OUTRO = 4.2, T_TOTAL = T_INTRO + T_GAME + T_OUTRO;
 function autopilotInput() {
   const me = ctrl;

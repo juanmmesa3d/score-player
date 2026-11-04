@@ -810,6 +810,8 @@ const live = () => running && !paused && freeze <= 0;
 // Input
 const keys = {};
 let charging = false, charge = 0, stickX = 0, stickY = 0, stickMag = 0;
+const TRAILER = /[?&]trailer\b/.test(location.search);
+const trailerEase = TRAILER ? 0.82 : 1;
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
@@ -930,14 +932,14 @@ function ai(p, dt) {
     const threat = Math.abs(ball.x - myGoalX) < 7;
     let tx = myGoalX + dir * 0.9, tz = clamp(ball.z * 0.7, -GW + 0.6, GW - 0.6);
     if (threat && bd < 4.5) { const lo = Math.min(myGoalX + dir * 0.6, myGoalX + dir * 5), hi = Math.max(myGoalX + dir * 0.6, myGoalX + dir * 5); tx = clamp(ball.x, lo, hi); tz = ball.z; }
-    steer(p, tx, tz, threat ? 6.6 : 4.5, dt);
+    steer(p, tx, tz, (threat ? 6.6 : 4.5) * (p.team === 'r' ? trailerEase : 1), dt);
     if (bd < 1.3 && ball.y < 2.3 && p.cd <= 0) kick(p, dir, rnd(-0.7, 0.7), 0.75, 0.6);
     return;
   }
   const mates = players.filter(q => q.team === p.team && q.role !== 'keeper');
   const dist = q => Math.hypot(ball.x - q.x, ball.z - q.z) + (q.role === 'human' ? -2.5 : 0);
   const chaser = mates.reduce((a, b) => dist(a) < dist(b) ? a : b);
-  const speed = p.team === 'r' ? 6.4 : 6.6;
+  const speed = p.team === 'r' ? 6.4 * trailerEase : 6.6;
   if (chaser === p) {
     const gx = oppGoalX - ball.x, gz = -ball.z, gn = Math.hypot(gx, gz) || 1;
     const behind = bd > 1.6;
@@ -966,8 +968,9 @@ function step(dt) {
   if (keys['arrowright'] || keys['d']) iz += 1;
   if (keys['arrowleft'] || keys['a']) iz -= 1;
   ix += -stickY; iz += stickX;
+  if (autopilot && live()) { const a = autopilotInput(); ix = a[0]; iz = a[1]; }
   const il = Math.hypot(ix, iz); if (il > 1) { ix /= il; iz /= il; }
-  const wantSprint = (keys['shift'] || sprintHeld || stickMag > 0.95) && Math.hypot(ix, iz) > 0.3;
+  const wantSprint = (keys['shift'] || sprintHeld || stickMag > 0.95 || (autopilot && apSprint)) && Math.hypot(ix, iz) > 0.3;
   const sprinting = wantSprint && stamina > 0.02;
   stamina = clamp(stamina + (sprinting ? -0.32 : 0.18) * dt, 0, 1);
   stamFill.style.width = (stamina * 100) + '%';
@@ -1074,7 +1077,7 @@ function togglePause() {
   if (paused) { charging = false; powerEl.classList.remove('on'); $('resumeBtn').focus(); if (actx) actx.suspend(); if (window.speechSynthesis) speechSynthesis.cancel(); }
   else if (actx) actx.resume();
 }
-$('startBtn').addEventListener('click', startMatch);
+$('startBtn').addEventListener('click', () => (TRAILER ? startTrailer() : startMatch()));
 $('againBtn').addEventListener('click', startMatch);
 $('restartBtn').addEventListener('click', startMatch);
 $('resumeBtn').addEventListener('click', togglePause);
@@ -1104,6 +1107,7 @@ function drawMini() {
 const camPos = new THREE.Vector3(-12, 6, 0), camLook = new THREE.Vector3();
 const tmpV = new THREE.Vector3(), tmpL = new THREE.Vector3();
 function resize() {
+  if (trailerFixed) return;
   const w = stage.clientWidth, h = stage.clientHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h; camera.fov = camera.aspect < 0.8 ? 74 : 58;
@@ -1155,7 +1159,102 @@ function draw(dt, t) {
   updateParts(dt);
   drawMini();
   renderer.render(scene, camera);
+  if (rec && rec.state === 'recording') composeFrame(t);
 }
+
+// ---------- Trailer mode (?trailer): the hero plays itself and a 1080p clip is recorded with title and end cards ----------
+let autopilot = false, apCharge = 0.5, apSprint = false, trailerFixed = false, rec = null, recStart = 0, recMime = '', recChunks = [];
+const T_INTRO = 2.8, T_GAME = 30, T_OUTRO = 4.2, T_TOTAL = T_INTRO + T_GAME + T_OUTRO;
+function autopilotInput() {
+  const me = ctrl;
+  if (hasBall(me)) {
+    const close = W - me.x < 13 && Math.abs(me.z) < 9;
+    const tz = Math.sin(performance.now() / 650) * (close ? 1.5 : 4);
+    const dx = W - me.x, dz = tz - me.z, d = Math.hypot(dx, dz) || 1;
+    if (close) {
+      if (!charging) { startCharge(); apCharge = rnd(0.4, 0.85); }
+      else if (charge >= apCharge) releaseShot();
+    }
+    apSprint = W - me.x > 15;
+    return [dx / d, dz / d];
+  }
+  if (charging) releaseShot();
+  const tx = ball.x - (ball.x < me.x ? 0 : 0.7), dx = tx - me.x, dz = ball.z - me.z, d = Math.hypot(dx, dz) || 1;
+  apSprint = d > 4;
+  return [dx / d, dz / d];
+}
+const comp = document.createElement('canvas'); comp.width = 1920; comp.height = 1080;
+const cg = comp.getContext('2d');
+function rr(x, y, w, h, r) { cg.beginPath(); cg.moveTo(x + r, y); cg.arcTo(x + w, y, x + w, y + h, r); cg.arcTo(x + w, y + h, x, y + h, r); cg.arcTo(x, y + h, x, y, r); cg.arcTo(x, y, x + w, y, r); cg.closePath(); }
+function bigText(txt, x, y, size, fill, stroke) {
+  cg.font = `italic ${size}px "Lilita One","Arial Black",sans-serif`; cg.textAlign = 'center'; cg.textBaseline = 'middle';
+  cg.lineWidth = size * 0.14; cg.strokeStyle = stroke; cg.lineJoin = 'round'; cg.strokeText(txt, x, y); cg.fillStyle = fill; cg.fillText(txt, x, y);
+}
+function card(alpha, outro) {
+  cg.save(); cg.globalAlpha = alpha;
+  const g = cg.createRadialGradient(960, 420, 80, 960, 540, 1100); g.addColorStop(0, '#5a33c8'); g.addColorStop(1, '#140d33');
+  cg.fillStyle = g; cg.fillRect(0, 0, 1920, 1080);
+  const s = outro ? 560 : 820;
+  if (coverImg.complete && coverImg.naturalWidth) { cg.save(); rr(960 - s / 2, outro ? 90 : 130, s, s, 28); cg.clip(); cg.drawImage(coverImg, 960 - s / 2, outro ? 90 : 130, s, s); cg.restore(); }
+  if (outro) {
+    bigText('PLAY FREE IN YOUR BROWSER', 960, 750, 74, '#ffffff', '#2a1a6e');
+    cg.font = '700 46px Rubik, sans-serif'; cg.fillStyle = '#ffc83a'; cg.textAlign = 'center'; cg.fillText('juanmmesa3d.github.io/score-player', 960, 840);
+    cg.font = '500 30px Rubik, sans-serif'; cg.fillStyle = '#d8d0ff'; cg.fillText('Art & direction: Juan Mesa  ·  ChatGPT · Photoshop · Meshy · Claude', 960, 930);
+  }
+  cg.restore();
+}
+function composeFrame(t) {
+  const e = (performance.now() - recStart) / 1000;
+  cg.drawImage(renderer.domElement, 0, 0, 1920, 1080);
+  // scoreboard
+  cg.save(); cg.globalAlpha = 0.92; rr(700, 26, 520, 84, 18); cg.fillStyle = '#140d33'; cg.fill(); cg.lineWidth = 3; cg.strokeStyle = '#8b5cff'; cg.stroke(); cg.restore();
+  cg.textBaseline = 'middle'; cg.textAlign = 'center';
+  cg.font = '42px "Lilita One","Arial Black",sans-serif'; cg.fillStyle = '#ffffff';
+  cg.fillText('HOME', 800, 68); cg.fillText('AWAY', 1120, 68);
+  cg.font = '56px "Lilita One","Arial Black",sans-serif'; cg.fillText(`${scoreB} – ${scoreR}`, 960, 64);
+  cg.font = '800 22px Rubik, sans-serif'; cg.fillStyle = '#d8d0ff'; cg.fillText(clockEl.textContent, 960, 100);
+  // watermark
+  cg.save(); cg.globalAlpha = 0.9; drawCrown(cg, 92, 64, 0.55); cg.restore();
+  cg.textAlign = 'left'; cg.font = 'italic 40px "Lilita One","Arial Black",sans-serif'; cg.fillStyle = '#ffffff'; cg.strokeStyle = '#2a1a6e'; cg.lineWidth = 6;
+  cg.strokeText('SCORE PLAYER', 130, 68); cg.fillText('SCORE PLAYER', 130, 68);
+  // goal banner and commentary captions
+  if (banner.classList.contains('show')) bigText(banner.textContent, 960, 470, 190, '#ffffff', '#2a1a6e');
+  const cap = $('caption');
+  if (cap.classList.contains('show') && cap.textContent) {
+    cg.font = '700 40px Rubik, sans-serif'; const w = cg.measureText(cap.textContent).width + 60;
+    cg.save(); cg.globalAlpha = 0.75; rr(960 - w / 2, 950, w, 70, 14); cg.fillStyle = '#000'; cg.fill(); cg.restore();
+    cg.fillStyle = '#ffffff'; cg.textAlign = 'center'; cg.fillText(cap.textContent, 960, 986);
+  }
+  // title and end cards
+  if (e < T_INTRO) card(e < T_INTRO - 0.5 ? 1 : (T_INTRO - e) / 0.5, false);
+  if (e > T_INTRO + T_GAME) card(Math.min(1, (e - T_INTRO - T_GAME) / 0.5), true);
+  if (e >= T_TOTAL && rec && rec.state === 'recording') { rec.stop(); autopilot = false; }
+}
+function startTrailer() {
+  initAudio();
+  trailerFixed = true;
+  renderer.setPixelRatio(1); renderer.setSize(1920, 1080, false);
+  camera.aspect = 16 / 9; camera.fov = 56; camera.updateProjectionMatrix();
+  document.querySelectorAll('.top,.pad,.sys,.meters').forEach(el => { el.style.visibility = 'hidden'; });
+  const stream = comp.captureStream(30);
+  try { const dest = actx.createMediaStreamDestination(); master.connect(dest); dest.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)); } catch (err) {}
+  recMime = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+  rec = new MediaRecorder(stream, recMime ? { mimeType: recMime, videoBitsPerSecond: 12e6 } : {});
+  recChunks = []; rec.ondataavailable = ev => { if (ev.data.size) recChunks.push(ev.data); };
+  rec.onstop = () => {
+    const blob = new Blob(recChunks, { type: recMime || 'video/webm' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'score-player-gameplay.' + (recMime.includes('mp4') ? 'mp4' : 'webm');
+    document.body.appendChild(a); a.click();
+    const done = document.createElement('div'); done.id = 'trailerDone';
+    done.textContent = 'Saved ' + a.download + ' (' + (blob.size / 1048576).toFixed(1) + ' MB)';
+    done.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:9;background:#140d33;color:#fff;font:700 22px Rubik,sans-serif;padding:18px 26px;border-radius:14px;border:2px solid #8b5cff';
+    document.body.appendChild(done);
+  };
+  startMatch(); autopilot = true; freeze = T_INTRO + 0.8;
+  rec.start(1000); recStart = performance.now();
+}
+if (TRAILER) { $('startBtn').textContent = 'Record gameplay video'; }
 
 resetPositions(); freeze = 0;
 let last = performance.now();
